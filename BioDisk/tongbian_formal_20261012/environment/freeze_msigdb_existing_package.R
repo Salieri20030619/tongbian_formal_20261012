@@ -1,0 +1,28 @@
+root<-'/mnt/BioDisk/wangmingyuan/tongbian_formal_20261012'
+out<-file.path(root,'03_inputs/references/msigdbr_26.1.0_20261012')
+dir.create(out,recursive=TRUE,showWarnings=FALSE)
+stopifnot(requireNamespace('msigdbr',quietly=TRUE))
+options(timeout=90)
+writeLines(capture.output(sessionInfo()),file.path(out,'sessionInfo.txt'))
+helpers<-grep('load|download',ls(asNamespace('msigdbr'),all.names=TRUE),value=TRUE)
+writeLines(unlist(lapply(helpers,function(n)c(paste('FUNCTION',n),deparse(get(n,envir=asNamespace('msigdbr')))))),file.path(out,'package_resource_loader_provenance.txt'))
+cat('MSIGDBR_RESOURCE_RETRIEVAL_START\n')
+c2<-msigdbr::msigdbr(db_species='HS',species='Homo sapiens',collection='C2')
+cp<-c2[grepl('^CP($|:)',c2$gs_subcollection),,drop=FALSE]
+bp<-msigdbr::msigdbr(db_species='HS',species='Homo sapiens',collection='C5',subcollection='GO:BP')
+resources<-list(C2_CP=cp,GO_BP=bp);summary<-list()
+for(n in names(resources)){
+ d<-resources[[n]];stopifnot(nrow(d)>0,all(d$db_target_species=='HS'|d$db_target_species=='Homo sapiens'|d$db_target_species=='human'))
+ genes<-split(d$gene_symbol,d$gs_name);genes<-lapply(genes,function(x)sort(unique(x[!is.na(x)&nzchar(x)])))
+ stopifnot(!anyDuplicated(names(genes)),all(lengths(genes)>0))
+ gmt<-file.path(out,paste0(n,'.human.symbols.gmt'))
+ writeLines(vapply(names(genes),function(gs){u<-unique(d$gs_url[d$gs_name==gs]);paste(c(gs,if(length(u))u[1] else 'msigdbr',genes[[gs]]),collapse='\t')},character(1)),gmt)
+ cols<-intersect(c('gs_id','gs_name','gs_collection','gs_subcollection','gs_description','gs_source_species','gs_url','db_version','db_target_species'),colnames(d))
+ meta<-unique(as.data.frame(d[,cols,drop=FALSE]))
+ write.table(meta,file.path(out,paste0(n,'_geneset_metadata.tsv')),sep='\t',quote=FALSE,row.names=FALSE)
+ saveRDS(d,file.path(out,paste0(n,'_source_mapping.rds')))
+ summary[[n]]<-list(gs_count=length(genes),membership_rows=nrow(d),db_version=unique(d$db_version),db_target_species=unique(d$db_target_species),package='msigdbr',package_version=as.character(packageVersion('msigdbr')),gmt=gmt)
+ cat(n,length(genes),'sets; DB',paste(unique(d$db_version),collapse=';'),'\n')
+}
+jsonlite::write_json(summary,file.path(out,'resource_summary.json'),pretty=TRUE,auto_unbox=TRUE)
+cat('MSIGDBR_RESOURCE_RETRIEVAL_COMPLETED\n')

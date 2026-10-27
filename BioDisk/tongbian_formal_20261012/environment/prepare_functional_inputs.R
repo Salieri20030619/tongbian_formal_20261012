@@ -1,0 +1,44 @@
+root<-'/mnt/BioDisk/wangmingyuan/tongbian_formal_20261012'
+out<-file.path(root,'05_human_RNA/host_functional_v1');dir.create(out,recursive=TRUE,showWarnings=FALSE)
+stopifnot(jsonlite::fromJSON(file.path(root,'05_human_RNA/R_DESeq2_bridge_v1/run_status.json'))$status=='COMPLETED')
+plan<-jsonlite::fromJSON(file.path(root,'00_protocol/functional_plan.json'))
+de<-read.delim(file.path(root,'05_human_RNA/R_DESeq2_bridge_v1/R_DESeq2_all_genes.tsv'),check.names=FALSE)
+vst<-as.matrix(read.delim(file.path(root,'05_human_RNA/R_DESeq2_bridge_v1/R_DESeq2_blind_VST_tested.tsv'),row.names=1,check.names=FALSE))
+meta<-read.delim(file.path(root,'03_inputs/GSE245885_pilot/metadata/samples.tsv'),check.names=FALSE)
+rownames(meta)<-meta$sample;meta$condition<-factor(meta$condition,levels=c('Control','STC'))
+stopifnot(identical(colnames(vst),meta$sample),ncol(vst)==10,all(is.finite(vst)),qr(model.matrix(~condition,meta))$rank==2)
+annotation<-de[match(rownames(vst),de$ensembl_id),c('ensembl_id','gene_name')];stopifnot(identical(annotation$ensembl_id,rownames(vst)))
+good<-!is.na(annotation$gene_name)&nzchar(annotation$gene_name)
+vst<-vst[good,,drop=FALSE];annotation<-annotation[good,,drop=FALSE]
+counts<-table(annotation$gene_name)
+sym<-rowsum(vst,group=annotation$gene_name,reorder=TRUE)/as.numeric(counts[sort(unique(annotation$gene_name))])
+stopifnot(identical(rownames(sym),sort(unique(annotation$gene_name))))
+variable<-apply(sym,1,var)>0
+symbol_audit<-data.frame(ensembl_id=annotation$ensembl_id,gene_symbol=annotation$gene_name,rows_per_symbol=as.integer(counts[annotation$gene_name]),symbol_variable=variable[annotation$gene_name])
+write.table(symbol_audit,file.path(out,'VST_symbol_aggregation_audit.tsv'),sep='\t',quote=FALSE,row.names=FALSE)
+sym<-sym[variable,,drop=FALSE]
+write.table(sym,file.path(out,'symbol_mean_VST_matrix.tsv'),sep='\t',quote=FALSE,col.names=NA)
+eligible<-de$passed_prefilter&is.finite(de$pvalue)&is.finite(de$stat)&!is.na(de$gene_name)&nzchar(de$gene_name)
+rank_df<-de[eligible,]
+rank_df<-rank_df[order(-rank_df$baseMean,rank_df$ensembl_id,method='radix'),]
+rank_df$selected_for_symbol<-!duplicated(rank_df$gene_name)
+write.table(rank_df[,c('ensembl_id','gene_name','baseMean','stat','pvalue','selected_for_symbol')],file.path(out,'GSEA_symbol_selection_audit.tsv'),sep='\t',quote=FALSE,row.names=FALSE)
+rank_df<-rank_df[rank_df$selected_for_symbol,]
+rank_df<-rank_df[order(-rank_df$stat,rank_df$gene_name,method='radix'),]
+ranks<-setNames(rank_df$stat,rank_df$gene_name)
+stopifnot(!anyDuplicated(names(ranks)),all(is.finite(ranks)))
+write.table(data.frame(gene_symbol=names(ranks),signed_Wald=as.numeric(ranks)),file.path(out,'all_testable_signed_Wald_ranking.tsv'),sep='\t',quote=FALSE,row.names=FALSE)
+gmt<-function(p){x<-strsplit(readLines(p,warn=FALSE),'\t',fixed=TRUE);setNames(lapply(x,function(z)unique(z[-c(1,2)])),vapply(x,'[',character(1),1))}
+modules<-gmt(file.path(root,'03_inputs/GSE245885_pilot/genesets/host_modules_frozen.gmt'))
+stopifnot(length(modules)==4,!anyDuplicated(names(modules)))
+module_coverage<-do.call(rbind,lapply(names(modules),function(n){m<-modules[[n]];data.frame(module=n,total_members=length(m),matched_symbols=sum(m %in% rownames(sym)),coverage_fraction=mean(m %in% rownames(sym)),missing_symbols=paste(setdiff(m,rownames(sym)),collapse=';'),eligible=sum(m %in% rownames(sym))>=5)}))
+write.table(module_coverage,file.path(out,'ssGSEA_module_coverage.tsv'),sep='\t',quote=FALSE,row.names=FALSE)
+net<-read.delim(file.path(root,'03_inputs/references/dorothea_hs_ABC_v1.22.0.tsv'),check.names=FALSE)
+stopifnot(all(net$confidence %in% c('A','B','C')),all(is.finite(net$mor)),!anyDuplicated(paste(net$tf,net$target,sep='|')))
+coverage<-do.call(rbind,lapply(sort(unique(net$tf)),function(tf){a<-net[net$tf==tf,];data.frame(TF=tf,total_targets=nrow(a),matched_targets=sum(a$target %in% rownames(sym)),coverage_fraction=mean(a$target %in% rownames(sym)),eligible=sum(a$target %in% rownames(sym))>=5)}))
+write.table(coverage,file.path(out,'VIPER_regulon_coverage.tsv'),sep='\t',quote=FALSE,row.names=FALSE)
+saveRDS(list(meta=meta,symbol_VST=sym,ranks=ranks,modules=modules,module_coverage=module_coverage,network=net,TF_coverage=coverage,plan=plan),file.path(out,'functional_inputs_frozen.rds'))
+summary<-list(samples=10,groups=as.list(table(meta$condition)),VST_ensembl_rows=nrow(vst),VST_symbols_after_mean=nrow(sym),constant_symbols_removed=sum(!variable),GSEA_eligible_original_rows=sum(eligible),GSEA_ranked_unique_symbols=length(ranks),GSEA_not_primary_testable=sum(de$passed_prefilter&!is.finite(de$pvalue)),GSEA_tied_statistic_rows=sum(duplicated(unname(ranks))),P_screen_applied=FALSE,modules=4,modules_eligible=sum(module_coverage$eligible),TFs_in_frozen_ABC=nrow(coverage),TFs_eligible=sum(coverage$eligible),design_rank=2)
+jsonlite::write_json(summary,file.path(out,'functional_input_summary.json'),pretty=TRUE,auto_unbox=TRUE)
+writeLines(capture.output(sessionInfo()),file.path(out,'input_sessionInfo.txt'))
+cat(jsonlite::toJSON(summary,pretty=TRUE,auto_unbox=TRUE),'\n')

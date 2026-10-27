@@ -1,0 +1,52 @@
+root<-'/mnt/BioDisk/wangmingyuan/tongbian_formal_20261012'
+out<-file.path(root,'12_reports/first_batch_figures');dir.create(out,recursive=TRUE,showWarnings=FALSE)
+readm<-function(p)as.matrix(read.delim(file.path(root,p),row.names=1,check.names=FALSE))
+qc<-read.delim(file.path(root,'05_human_RNA/sample_QC_v1/sample_QC_all_samples.tsv'))
+pc<-read.delim(file.path(root,'05_human_RNA/sample_QC_v1/PCA_top500_variable_VST_scores.tsv'))
+pa<-read.delim(file.path(root,'05_human_RNA/sample_QC_v1/PCA_all_VST_scores.tsv'))
+pv<-read.delim(file.path(root,'05_human_RNA/sample_QC_v1/PCA_variance_explained.tsv'))
+col<-ifelse(qc$condition=='STC','#BA5B3B','#2F6F8F')
+plot_pc<-function(a,pct,title){
+ xx<-a$PC1;yy<-a$PC2;rx<-range(xx);ry<-range(yy);dx<-diff(rx);dy<-diff(ry)
+ plot(xx,yy,xlim=rx+c(-.28,.32)*dx,ylim=ry+c(-.22,.3)*dy,pch=19,col=col,xlab=sprintf('PC1 (%.1f%%)',pct[1]),ylab=sprintf('PC2 (%.1f%%)',pct[2]),main=title,cex.main=.9)
+ for(g in c('Control','STC')){
+  z<-which(a$condition==g);z<-z[order(yy[z])];ty<-yy[z]
+  for(j in 2:length(z))ty[j]<-max(ty[j],ty[j-1]+.11*dy)
+  if(g=='Control'){tx<-min(xx[z])-.07*dx;pos<-2}else{tx<-max(xx[z])+.06*dx;pos<-4}
+  segments(xx[z],yy[z],tx,ty,col=col[z],lwd=.65)
+  text(rep(tx,length(z)),ty,labels=a$sample[z],pos=pos,cex=.75,col=col[z])
+ }
+ legend('bottomleft',c('Cancer-surgery control','STC'),pch=19,col=c('#2F6F8F','#BA5B3B'),cex=.65,bty='n')
+}
+png(file.path(out,'Figure_sample_QC.png'),width=2100,height=1700,res=180,type='cairo')
+par(mfrow=c(2,2),mar=c(7,5,3,1))
+barplot(qc$raw_library_count/1e6,names.arg=qc$sample,las=2,col=col,ylab='Million gene-assigned counts',main='Raw count library size',cex.main=.9)
+barplot(qc$size_factor,names.arg=qc$sample,las=2,col=col,ylab='DESeq2 size factor',main='Median-ratio normalization',cex.main=.9)
+par(mar=c(5,5,4,1))
+plot_pc(pc,pv$top500_percent_variance[1:2],'PCA: 500 most variable blind-VST genes')
+plot_pc(pa,pv$all_genes_percent_variance[1:2],'PCA: all 20,479 prefiltered blind-VST genes')
+dev.off()
+heat<-function(m,path,title,subtitle,cols,zlim,legendlabel,annotate=FALSE){
+ png(path,width=1800,height=1500,res=160,type='cairo')
+ layout(matrix(c(1,2),1,2),widths=c(6,1));par(mar=c(7,9,6,1))
+ n<-nrow(m);k<-ncol(m)
+ image(seq_len(k),seq_len(n),t(m[n:1,,drop=FALSE]),col=cols,zlim=zlim,xaxt='n',yaxt='n',xlab='',ylab='',xlim=c(.5,k+.5),ylim=c(.5,n+.5),useRaster=TRUE)
+ axis(1,at=seq_len(k),labels=colnames(m),las=2,tick=FALSE,cex.axis=.9)
+ axis(2,at=seq_len(n),labels=rev(rownames(m)),las=2,tick=FALSE,cex.axis=.85)
+ if(annotate)for(i in seq_len(n))for(j in seq_len(k))text(j,n-i+1,sprintf('%.3f',m[i,j]),cex=.65,col=ifelse(m[i,j]>mean(zlim),'white','#23343B'))
+ abline(v=5.5,col='white',lwd=3)
+ title(main=title,cex.main=1,line=3);mtext(subtitle,side=3,line=1,cex=.7)
+ par(mar=c(7,1,6,4))
+ yy<-seq(zlim[1],zlim[2],length.out=length(cols)+1)
+ plot.new();plot.window(xlim=c(0,1),ylim=zlim);rect(0,head(yy,-1),.4,tail(yy,-1),col=cols,border=NA)
+ axis(4,at=pretty(zlim,5),las=1,cex.axis=.8);mtext(legendlabel,side=4,line=2.5,cex=.8)
+ dev.off()
+}
+cm<-readm('05_human_RNA/sample_QC_v1/sample_correlation_Pearson_all_VST.tsv')
+heat(cm,file.path(out,'Figure_sample_correlation.png'),'Sample correlation','Pearson correlation of all 20,479 prefiltered blind-VST genes',colorRampPalette(c('#F1F5F7','#90B9C9','#235875'))(101),range(cm),'Pearson r',TRUE)
+vp<-readm('05_human_RNA/host_functional_v1/VIPER_sample_activity_matrix.tsv')
+res<-read.delim(file.path(root,'05_human_RNA/host_functional_v1/VIPER_all_TFs_limma_ALL_results.tsv'))
+top<-head(res$feature[order(res$P_value,res$feature)],20);hm<-t(scale(t(vp[top,,drop=FALSE])));mx<-max(abs(hm))
+heat(hm,file.path(out,'Figure_VIPER_top20_display_only.png'),'VIPER activity: top 20 TFs by limma P','Display selection only; inference retained for all 270 TFs; row-standardized scores',colorRampPalette(c('#276481','white','#AE4D33'))(101),c(-mx,mx),'Row z-score')
+for(rel in c('host_functional_v1/Figure_ssGSEA_four_modules.png','fgsea_v1/Figure_fgsea_top_pathways_display_only.png','sample_QC_v1/Figure_dispersion_and_P.png'))file.copy(file.path(root,'05_human_RNA',rel),file.path(out,basename(rel)),overwrite=TRUE)
+cat('FINAL_FIGURES_COMPLETE; statistical matrices unchanged\n')

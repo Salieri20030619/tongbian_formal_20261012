@@ -1,0 +1,57 @@
+root<-'/mnt/BioDisk/wangmingyuan/tongbian_formal_20261012'
+source(file.path(root,'environment/prepare_functional_inputs.R'))
+out<-file.path(root,'05_human_RNA/host_functional_v1')
+x<-readRDS(file.path(out,'functional_inputs_frozen.rds'));set.seed(20261012)
+status<-function(stage,extra=list())jsonlite::write_json(c(list(stage=stage,time_utc=format(Sys.time(),tz='UTC')),extra),file.path(out,'scores_status.json'),pretty=TRUE,auto_unbox=TRUE)
+status('RUNNING_SSGSEA')
+param<-GSVA::ssgseaParam(exprData=x$symbol_VST,geneSets=x$modules,minSize=5,maxSize=Inf,alpha=.25,normalize=TRUE,checkNA='yes',use='all.obs',verbose=FALSE)
+ss<-GSVA::gsva(param,verbose=FALSE,BPPARAM=BiocParallel::SerialParam())
+stopifnot(ncol(ss)==10,identical(colnames(ss),x$meta$sample),all(is.finite(ss)))
+write.table(ss,file.path(out,'true_ssGSEA_scores.tsv'),sep='\t',quote=FALSE,col.names=NA)
+saveRDS(ss,file.path(out,'true_ssGSEA_scores.rds'))
+status('SSGSEA_COMPLETE_RUNNING_VIPER',list(ssGSEA_features=nrow(ss)))
+vp<-decoupleR::run_viper(mat=x$symbol_VST,network=x$network,.source='tf',.target='target',.mor='mor',minsize=5,verbose=FALSE,pleiotropy=TRUE,eset.filter=FALSE,method='scale',bootstraps=0,cores=1)
+vp<-as.data.frame(vp)
+stopifnot(all(c('source','condition','score') %in% colnames(vp)),!anyDuplicated(paste(vp$source,vp$condition,sep='|')),all(is.finite(vp$score)))
+write.table(vp,file.path(out,'VIPER_all_sample_activities_long.tsv'),sep='\t',quote=FALSE,row.names=FALSE)
+tfs<-sort(unique(vp$source));vmat<-matrix(NA_real_,nrow=length(tfs),ncol=nrow(x$meta),dimnames=list(tfs,x$meta$sample))
+for(i in seq_len(nrow(vp)))vmat[vp$source[i],vp$condition[i]]<-vp$score[i]
+stopifnot(all(is.finite(vmat)))
+write.table(vmat,file.path(out,'VIPER_sample_activity_matrix.tsv'),sep='\t',quote=FALSE,col.names=NA)
+tfcoverage<-x$TF_coverage;tfcoverage$returned_by_VIPER<-tfcoverage$TF %in% rownames(vmat)
+write.table(tfcoverage,file.path(out,'VIPER_regulon_coverage_and_return_status.tsv'),sep='\t',quote=FALSE,row.names=FALSE)
+status('SCORING_COMPLETE_RUNNING_LIMMA',list(ssGSEA_features=nrow(ss),VIPER_TFs=nrow(vmat)))
+design<-model.matrix(~condition,x$meta);stopifnot(qr(design)$rank==ncol(design))
+fit_scores<-function(mat,family){
+ fit<-limma::eBayes(limma::lmFit(mat,design),trend=FALSE,robust=FALSE)
+ k<-match('conditionSTC',colnames(design));effect<-fit$coefficients[,k]
+ se<-fit$stdev.unscaled[,k]*sqrt(fit$s2.post);crit<-qt(.975,df=fit$df.total)
+ res<-data.frame(feature=rownames(mat),family=family,mean_Control=rowMeans(mat[,x$meta$condition=='Control',drop=FALSE]),mean_STC=rowMeans(mat[,x$meta$condition=='STC',drop=FALSE]),delta_score=effect,moderated_t=fit$t[,k],P_value=fit$p.value[,k],BH=p.adjust(fit$p.value[,k],method='BH'),CI95_low=effect-crit*se,CI95_high=effect+crit*se,n_Control=5,n_STC=5,stringsAsFactors=FALSE)
+ res$nominal_P_lt_005<-!is.na(res$P_value)&res$P_value<.05
+ write.table(res,file.path(out,paste0(family,'_limma_ALL_results.tsv')),sep='\t',quote=FALSE,row.names=FALSE,na='NA')
+ saveRDS(fit,file.path(out,paste0(family,'_limma_fit.rds')))
+ res
+}
+ssres<-fit_scores(ss,'ssGSEA_four_prespecified_modules');vres<-fit_scores(vmat,'VIPER_all_TFs')
+summary<-list(contrast='STC minus cancer-surgery normal-colon controls',score_method='GSVA ssGSEA, not old mean gene-z',ssGSEA_features=nrow(ss),ssGSEA_nominal=sum(ssres$P_value<.05,na.rm=TRUE),ssGSEA_BH_lt_005=sum(ssres$BH<.05,na.rm=TRUE),VIPER_TFs=nrow(vmat),VIPER_nominal=sum(vres$P_value<.05,na.rm=TRUE),VIPER_BH_lt_005=sum(vres$BH<.05,na.rm=TRUE),VIPER_source='DoRothEA 1.22.0 human A-C',viper_internal_signature='gene-wise scale of VST across samples',separate_BH_families=TRUE,no_FC_threshold=TRUE,score_activity_is_inferred_not_TF_expression=TRUE,interpretation='observational disease-associated host evidence; not treatment efficacy')
+jsonlite::write_json(summary,file.path(out,'scores_summary.json'),pretty=TRUE,auto_unbox=TRUE)
+writeLines(capture.output(sessionInfo()),file.path(out,'scores_sessionInfo.txt'))
+status('COMPLETED',summary)
+cat(jsonlite::toJSON(summary,pretty=TRUE,auto_unbox=TRUE),'\n')
+cat('FOUR_MODULE_RESULTS\n');print(ssres,row.names=FALSE)
+# Figures display all four prespecified modules; no result-based module selection.
+png(file.path(out,'Figure_ssGSEA_four_modules.png'),width=1600,height=1200,res=150,type='cairo')
+par(mfrow=c(2,2),mar=c(5,5,4,1))
+for(i in seq_len(nrow(ss))){
+ yy<-ss[i,];idx0<-which(x$meta$condition=='Control');idx1<-which(x$meta$condition=='STC')
+ plot(rep(c(1,2),c(length(idx0),length(idx1))),c(yy[idx0],yy[idx1]),xlim=c(.6,2.4),xaxt='n',xlab='',ylab='ssGSEA score',main=gsub('_',' ',rownames(ss)[i]),pch=19,col=rep(c('#2F6F8F','#BA5B3B'),each=5),cex.main=.8)
+ axis(1,at=1:2,labels=c('Cancer-surgery control','STC'),cex.axis=.75)
+ segments(c(.85,1.85),c(mean(yy[idx0]),mean(yy[idx1])),c(1.15,2.15),lwd=3,col='black')
+ r<-ssres[match(rownames(ss)[i],ssres$feature),];mtext(sprintf('delta %.3f | P %.3g | BH %.3g',r$delta_score,r$P_value,r$BH),side=3,line=.3,cex=.7)
+}
+dev.off()
+top<-head(vres$feature[order(vres$P_value,vres$feature)],20)
+hm<-vmat[top,,drop=FALSE];hm<-t(scale(t(hm)))
+png(file.path(out,'Figure_VIPER_top20_display_only.png'),width=1700,height=1400,res=150,type='cairo')
+heatmap(hm,Rowv=NA,Colv=NA,scale='none',col=colorRampPalette(c('#276481','white','#AE4D33'))(101),margins=c(8,9),main='VIPER: top 20 by limma P (display only); row z-score')
+dev.off()
